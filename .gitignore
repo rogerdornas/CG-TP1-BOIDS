@@ -1,0 +1,9 @@
+# Ignorar arquivos temporários do Visual Studio
+.vs/
+
+# Ignorar pasta de saída/build
+out/
+
+# Ignorar arquivos de sistema operacional
+Thumbs.db
+.DS_Store
