@@ -1,4 +1,3 @@
-#include <GL/glew.h>
 #include <GL/glut.h>
 #include "World.h"
 #include <map>
@@ -69,12 +68,6 @@ int main(int argc, char** argv) {
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
     glutInitWindowSize(windowWidth, windowHeight);
     glutCreateWindow("Boids 3D");
-
-    GLenum err = glewInit();
-    if (err != GLEW_OK) {
-        fprintf(stderr, "Erro ao inicializar GLEW: %s\n", glewGetErrorString(err));
-        return -1;
-    }
 
     initGL();
     world.Init();
