@@ -3,6 +3,12 @@
 #include <vector>
 #include <map>
 
+// Definição de obstáculo
+struct Obstacle {
+    Vector3 position;
+    float radius;
+};
+
 class World {
 public:
     World();
@@ -15,8 +21,8 @@ public:
     void RemoveBoid();
 
     Boid* GetGoal() { return mGoal; }
-
     std::vector<Boid*> GetBoids() { return mBoids; }
+    std::vector<Obstacle>& GetObstacles() { return mObstacles; } 
 
 private:
     enum class CameraMode {
@@ -24,11 +30,19 @@ private:
         Behind,
         Side
     };
+    
     std::vector<Boid*> mBoids;
-    Boid* mGoal; // boid-objetivo
-    CameraMode mCameraMode; // 0=tower, 1=behind flock, 2=side view
+    std::vector<Obstacle> mObstacles; 
+    Boid* mGoal;
+    CameraMode mCameraMode;
+
+    // Estados Globais
+    bool mIsPaused;
+    bool mIsFogEnabled;
 
     void SetCamera();
     void DrawGround();
     void DrawTower();
+    void DrawObstacles();
+    void DrawShadows(); 
 };
