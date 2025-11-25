@@ -40,6 +40,12 @@ private:
     bool mIsPaused;
     bool mIsFogEnabled;
 
+    Vector3 mCamEye;    // Onde a câmera está agora
+    Vector3 mCamAt;     // Para onde ela está olhando agora
+    float mZoomDist;
+
+    void UpdateCamera(float dt); // Nova função para calcular física da câmera
+
     void SetCamera();
     void DrawGround();
     void DrawTower();

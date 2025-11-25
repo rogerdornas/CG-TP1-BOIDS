@@ -7,7 +7,7 @@ public:
     Boid(class World* world);
 
     virtual void Update(float deltaTime);
-    void Draw();
+    void Draw(bool isShadow = false);
 
     Vector3 GetPosition() { return mPosition; }
     void SetPosition(Vector3 pos) { mPosition = pos; }
@@ -21,7 +21,7 @@ public:
 
 protected:
 	Vector3 CalculateNormal(Vector3 v1, Vector3 v2, Vector3 v3);
-	void DrawBirdModel(float wingOffset);
+	void DrawBirdModel(float wingOffset, bool isShadow);
 
 
     class World* mWorld;

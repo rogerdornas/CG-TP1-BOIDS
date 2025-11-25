@@ -18,7 +18,7 @@ Boid::Boid(World* world)
     mPrevYaw = mYaw;
 	mPitch = Random::GetFloatRange(-20.0f, 20.0f);
     mRoll = 0.0f;
-    mColor = Vector3(0.5f, 0.5f, 1.0f); // Cor padrão azulada para o bando
+    mColor = Vector3(0.9f, 0.9f, 0.3f); // Cor padrão azulada para o bando
 
     // Se este boid for criado e já houver um objetivo, define uma velocidade inicial
     if (mWorld->GetGoal() && this != mWorld->GetGoal()) {
@@ -27,7 +27,7 @@ Boid::Boid(World* world)
 
     // Inicializa animação dessincronizada [cite: 26, 27]
     mAnimPhase = Random::GetFloatRange(0.0f, Math::TwoPi);
-    mFlapSpeed = Random::GetFloatRange(15.0f, 25.0f); 
+    mFlapSpeed = Random::GetFloatRange(12.0f, 20.0f); 
 
     mWorld->AddBoid(this);
 }
@@ -43,6 +43,8 @@ void Boid::Update(float deltaTime) {
         const float cohesionWeight = 0.8f;
         const float goalWeight = 1.2f; 
         const float obstacleWeight = 5.0f; // Peso alto para evitar colisão a todo custo
+        const float floorWeight = 8.0f; // Peso ALTO para evitar o chão
+        const float towerWeight = 10.0f; // Peso ALTO para evitar a torre
 
         const float perceptionRadius = 20.0f;
         const float separationRadius = 8.0f;
@@ -52,6 +54,8 @@ void Boid::Update(float deltaTime) {
         Vector3 cohesion(0,0,0);
         Vector3 goalForce(0,0,0);
         Vector3 obstacleForce(0,0,0); // Força de evitar obstáculos
+        Vector3 floorForce(0, 0, 0); // Força para evitar o chão
+        Vector3 towerForce(0, 0, 0);// Força para evitar a torre
 
         Vector3 centerOfMass(0,0,0);
         int neighborCount = 0;
@@ -98,8 +102,7 @@ void Boid::Update(float deltaTime) {
             }
         }
 
-        // 3. EVITAR OBSTÁCULOS (NOVO)
-        // O Boid Objetivo é fantasma, mas este bloco é "if (!isGoal)", então ok.
+        // 3. EVITAR OBSTÁCULOS (ESFERAS)
         auto& obstacles = mWorld->GetObstacles();
         for (const auto& obs : obstacles) {
             float distToObs = Vector3::Distance(mPosition, obs.position);
@@ -120,13 +123,62 @@ void Boid::Update(float deltaTime) {
         }
         if (obstacleForce.LengthSq() > 0.001f) obstacleForce.Normalize();
 
+        // 4. EVITAR O CHÃO
+        // Se estiver abaixo de Y = 15, começa a empurrar para cima
+        float floorThreshold = 15.0f;
+        if (mPosition.y < floorThreshold) {
+            float ratio = (floorThreshold - mPosition.y) / floorThreshold;
+            // Vetor para Cima (0, 1, 0)
+            // ratio * ratio cria uma curva exponencial: fraco longe, muito forte perto
+            floorForce = Vector3(0, 1, 0) * (ratio * ratio);
+        }
+
+        // 5. EVITAR TORRE (CONE)
+        // A torre está em (0,0,0), Radius Base = 3, Altura = 20 (definido no World.cpp)
+        const float tBaseRadius = 3.0f;
+        const float tHeight = 20.0f;
+        const float tMargin = 6.0f; // Margem de segurança larga
+
+        // Só se preocupa se estiver na faixa de altura da torre (com margem no topo)
+        if (mPosition.y > -5.0f && mPosition.y < (tHeight + tMargin)) {
+
+            // Distância horizontal do centro (0,0)
+            float distXZ = sqrtf(mPosition.x * mPosition.x + mPosition.z * mPosition.z);
+
+            // Calcula o raio do cone na altura atual do boid.
+            // Quanto mais alto, menor o raio.
+            // Fórmula: RaioAtual = RaioBase * (1 - Y / Altura)
+            float currentConeRadius = 0.0f;
+            if (mPosition.y < tHeight) {
+                currentConeRadius = tBaseRadius * (1.0f - (mPosition.y / tHeight));
+            }
+            // Se estiver acima da ponta (mas dentro da margem), o raio do cone é 0
+
+            // Raio de evasão = Raio Geométrico + Margem de Segurança
+            float evasionRadius = currentConeRadius + tMargin;
+
+            if (distXZ < evasionRadius) {
+                // Empurra para fora horizontalmente (afasta do eixo Y)
+                Vector3 push(mPosition.x, 0.0f, mPosition.z);
+
+                // Proteção caso esteja exatamente no centro (0,0,0)
+                if (push.LengthSq() < 0.001f) push = Vector3(1, 0, 0);
+                else push.Normalize();
+
+                // Força inversamente proporcional à distância (mais perto = mais força)
+                float strength = (evasionRadius - distXZ) / evasionRadius;
+                towerForce = push * strength;
+            }
+        }
 
         // Soma vetorial
         Vector3 steering = (separation * separationWeight) +
                            (alignment * alignmentWeight) +
                            (cohesion * cohesionWeight) +
                            (goalForce * goalWeight) +
-                           (obstacleForce * obstacleWeight); // Prioridade alta
+                           (obstacleForce * obstacleWeight) +
+                           (floorForce * floorWeight) +
+                           (towerForce * towerWeight);
 
         // Aplica forças
         if (steering.LengthSq() > 0.001f) {
@@ -167,13 +219,26 @@ void Boid::Update(float deltaTime) {
         mPosition += mVelocity * deltaTime;
     }
 
+    // --- LIMITE RÍGIDO DO CHÃO (Para todos, inclusive o Líder) ---
+    // Impede fisicamente de passar de Y = 2.0 (altura segura para não cortar a asa)
+    if (mPosition.y < 2.0f) {
+        mPosition.y = 2.0f;
+
+        // Se estiver apontando para baixo, zera a velocidade vertical e corrige o pitch
+        if (mVelocity.y < 0) {
+            mVelocity.y = 0;
+            // Força o boid a olhar para frente/cima levemente para sair do chão
+            if (mPitch < 0) mPitch = 0;
+        }
+    }
+
     // --- ANIMAÇÃO E BANKING ---
     float yawDiff = mYaw - mPrevYaw;
     if (yawDiff > 180.0f) yawDiff -= 360.0f;
     if (yawDiff < -180.0f) yawDiff += 360.0f;
 
-    float targetRoll = yawDiff * -8.0f;
-    targetRoll = Math::Clamp(targetRoll, -60.0f, 60.0f);
+    float targetRoll = yawDiff * -12.0f;
+    targetRoll = Math::Clamp(targetRoll, -90.0f, 90.0f);
 
     float bankSpeed = (fabs(yawDiff) < 0.1f) ? 2.0f : 5.0f;
     mRoll += (targetRoll - mRoll) * bankSpeed * deltaTime;
@@ -199,7 +264,7 @@ Vector3 Boid::CalculateNormal(Vector3 v1, Vector3 v2, Vector3 v3) {
     return normal;
 }
 
-void Boid::DrawBirdModel(float wingOffset) {
+void Boid::DrawBirdModel(float wingOffset, bool isShadow) {
     const float s = 0.5f;
 
     // Vértices fixos do corpo
@@ -220,7 +285,9 @@ void Boid::DrawBirdModel(float wingOffset) {
     glBegin(GL_TRIANGLES);
 
     // --- BICO ---
-    glColor3f(0.8f, 0.1f, 0.1f);
+    if (!isShadow) {
+        glColor3f(0.8f, 0.1f, 0.1f);
+    }
 
     // Bico Superior Dir
     normal = CalculateNormal(vTip, vBodySideR, vBeakBase);
@@ -251,7 +318,9 @@ void Boid::DrawBirdModel(float wingOffset) {
     glVertex3f(vBelly.x, vBelly.y, vBelly.z);
 
     // --- CORPO ---
-    glColor3f(mColor.x, mColor.y, mColor.z);
+    if (!isShadow) {
+        glColor3f(mColor.x, mColor.y, mColor.z);
+    }
 
     // Costas
     normal = CalculateNormal(vNeck, vBodySideR, vTailTip);
@@ -326,7 +395,7 @@ void Boid::DrawBirdModel(float wingOffset) {
 }
 
 
-void Boid::Draw() {
+void Boid::Draw(bool isShadow) {
      glPushMatrix();
      glTranslatef(mPosition.x, mPosition.y, mPosition.z);
 
@@ -340,7 +409,7 @@ void Boid::Draw() {
     // Multiplicamos por 0.5f para definir a amplitude (altura) da batida.
      float wingOffset = sinf(mAnimPhase) * 0.5f;
 
-     DrawBirdModel(wingOffset);
+     DrawBirdModel(wingOffset, isShadow);
 
      glPopMatrix();
 }

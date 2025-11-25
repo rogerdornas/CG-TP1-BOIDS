@@ -6,9 +6,12 @@
 
 World::World()
     :mGoal(nullptr)
-    ,mCameraMode(CameraMode::Tower)
+    ,mCameraMode(CameraMode::Behind)
     ,mIsPaused(false)
     ,mIsFogEnabled(false)
+    ,mCamEye(0, 50, 50)  // Valores iniciais para não começar no zero
+    ,mCamAt(0, 0, 0)
+    ,mZoomDist(0.0f)
 {
 }
 
@@ -16,7 +19,7 @@ void World::Init() {
     Random::Init();
 
     // Cria alguns boids iniciais
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 30; i++) {
         new Boid(this);
     }
 
@@ -32,11 +35,69 @@ void World::Init() {
 
 void World::Update(float deltaTime) {
     // Se estiver pausado, não atualiza a física (mas permite input de câmera)
-    if (mIsPaused) return;
+    if (mIsPaused) {
+        UpdateCamera(deltaTime);
+        return;
+    }
 
     for (auto b : mBoids) {
         b->Update(deltaTime);
     }
+
+    UpdateCamera(deltaTime);
+}
+
+void World::UpdateCamera(float dt) {
+    Vector3 center(0, 0, 0);
+    Vector3 avgVel(0, 0, 1); // Valor padrão seguro
+
+    if (!mBoids.empty()) {
+        for (auto b : mBoids) {
+            center += b->GetPosition();
+            avgVel += b->GetVelocity();
+        }
+        center *= 1.0f / static_cast<float>(mBoids.size());
+        avgVel.Normalize(); // Direção média do bando
+    }
+    if (std::isnan(center.x)) center = Vector3::Zero;
+
+    Vector3 targetEye;
+    Vector3 targetAt = center; // A maioria das câmeras olha para o centro
+
+    // --- DEFINIÇÃO DOS ALVOS DA CÂMERA ---
+    switch (mCameraMode) {
+    case CameraMode::Tower:
+        // Agora a torre acompanha o bando de cima, em vez de ficar fixa no mundo
+        // Olhando de cima (Y+60) e um pouco recuada (Z-10)
+        targetEye = center + Vector3(0.0f, 60.0f + mZoomDist, -1.0f);
+        break;
+
+    case CameraMode::Behind:
+        // Atrás e levemente acima
+        // Multiplicamos avgVel por -35 para ficar atrás
+        targetEye = center - (avgVel * (35.0f + mZoomDist)) + Vector3(0.0f, 12.0f + (mZoomDist * 0.2f), 0.0f);
+        break;
+
+    case CameraMode::Side:
+    {
+        // Calcula vetor lateral
+        Vector3 side = Vector3::Cross(avgVel, Vector3::UnitY);
+        side.Normalize();
+        // Posiciona a 40 unidades do lado e na altura do bando
+        targetEye = center + (side * (40.0f + mZoomDist)) + Vector3(0.0f, 2.0f, 0.0f);
+    }
+    break;
+    }
+
+    // --- SUAVIDADE (INTERPOLAÇÃO) ---
+    // O fator define o quão rápido a câmera alcança o alvo (0 a 1).
+    // Um valor baixo (2.0 * dt) é lento e cinematográfico.
+    // Um valor alto (10.0 * dt) é rápido e responsivo.
+    float smoothFactor = 3.0f * dt;
+
+    // Lerp (Linear Interpolation): Atual = Atual + (Alvo - Atual) * Fator
+    mCamEye = Vector3::Lerp(mCamEye, targetEye, smoothFactor);
+    mCamAt = Vector3::Lerp(mCamAt, targetAt, smoothFactor);
 }
 
 void World::Draw() {
@@ -103,7 +164,17 @@ void World::DrawObstacles() {
 void World::DrawShadows() {
     // Desabilita iluminação e profundidade para desenhar sombras "chapadas"
     glDisable(GL_LIGHTING);
-    glDisable(GL_DEPTH_TEST); 
+
+    // MANTÉM DEPTH TEST LIGADO
+    // Isso garante que se houver uma esfera na frente da sombra, a esfera vence.
+    glEnable(GL_DEPTH_TEST);
+
+    // HABILITA TRANSPARÊNCIA (Blending)
+    // Isso faz a sombra ficar suave e escura, em vez de um bloco preto sólido
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    glDepthMask(GL_FALSE);
     
     glPushMatrix();
     
@@ -112,7 +183,8 @@ void World::DrawShadows() {
     glTranslatef(0.0f, 0.1f, 0.0f);
     glScalef(1.0f, 0.0f, 1.0f); 
 
-    glColor3f(0.1f, 0.1f, 0.1f); // Sombra cinza escura
+    // Cor preta com 50% de transparência (Alpha = 0.5)
+    glColor4f(0.0f, 0.0f, 0.0f, 0.5f);
 
     for (auto b : mBoids) {
         // Desenha apenas a geometria do boid, sem alterar a cor (pois definimos cinza acima)
@@ -122,13 +194,14 @@ void World::DrawShadows() {
         
         // Hack: Vamos chamar o Draw do boid. Como Lighting está OFF, a cor definida 
         // no glColor3f acima vai "tingir" o objeto se ele não usar texturas.
-        b->Draw();
+        b->Draw(true);
     }
 
     glPopMatrix();
 
     // Restaura estados
-    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
     glEnable(GL_LIGHTING);
 }
 
@@ -136,38 +209,10 @@ void World::SetCamera() {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-    // Calcula o centro do bando (ignora NaNs com check simples)
-    Vector3 center(0, 0, 0);
-    if (!mBoids.empty()) {
-        for (auto b : mBoids) {
-            center += b->GetPosition();
-        }
-        center *= 1.0f / static_cast<float>(mBoids.size());
-    }
-    
-    // Proteção NaN
-    if (std::isnan(center.x)) center = Vector3::Zero;
-
-    if (mCameraMode == CameraMode::Tower)
-        gluLookAt(0, 40, 0, center.x, center.y, center.z, 0, 1, 0); // Torre mais alta
-    else if (mCameraMode == CameraMode::Behind) {
-        // Pega velocidade média para saber "atrás"
-        Vector3 avgVel = Vector3::UnitX;
-        if (!mBoids.empty()) avgVel = mBoids[0]->GetVelocity();
-        avgVel.Normalize();
-        
-        Vector3 eye = center - avgVel * 30.0f + Vector3(0, 10, 0);
-        gluLookAt(eye.x, eye.y, eye.z, center.x, center.y, center.z, 0, 1, 0);
-    }
-    else { // Side
-        Vector3 avgVel = Vector3::UnitX;
-        if (!mBoids.empty()) avgVel = mBoids[0]->GetVelocity();
-        Vector3 side = Vector3::Cross(avgVel, Vector3::UnitY);
-        side.Normalize();
-
-        Vector3 eye = center + side * 40.0f + Vector3(0, 5, 0);
-        gluLookAt(eye.x, eye.y, eye.z, center.x, center.y, center.z, 0, 1, 0);
-    }
+    // Agora usamos as variáveis interpoladas (suaves)
+    gluLookAt(mCamEye.x, mCamEye.y, mCamEye.z,
+        mCamAt.x, mCamAt.y, mCamAt.z,
+        0, 1, 0);
 }
 
 void World::HandleKey(std::map<unsigned char, bool> keyStates, std::map<unsigned char, bool> prevKeyStates) {
@@ -187,6 +232,17 @@ void World::HandleKey(std::map<unsigned char, bool> keyStates, std::map<unsigned
     }
     if (keyStates['p'] && !prevKeyStates['p']) {
         mIsPaused = !mIsPaused;
+    }
+
+    // --- CONTROLE DE ZOOM ---
+    // Q para Afastar (Zoom Out), E para Aproximar (Zoom In)
+    if (keyStates['q']) {
+        mZoomDist += 0.5f;
+        if (mZoomDist > 150.0f) mZoomDist = 150.0f; // Limite máximo
+    }
+    if (keyStates['e']) {
+        mZoomDist -= 0.5f;
+        if (mZoomDist < -25.0f) mZoomDist = -25.0f; // Limite mínimo (não atravessar o boid)
     }
 
     // Controle do boid-objetivo (apenas se não estiver pausado ou se quiser permitir mover na pausa)
