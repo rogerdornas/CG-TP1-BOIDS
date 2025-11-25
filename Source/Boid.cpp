@@ -2,6 +2,8 @@
 #include <GL/glut.h>
 #include "Random.h"
 #include "World.h"
+#include <vector>
+#include <cmath>
 
 Boid::Boid(World* world)
     :mWorld(world)
@@ -10,76 +12,191 @@ Boid::Boid(World* world)
     ,mSpeed(0.0f)
 	,mMaxSpeed(20.0f)
 {
-    mPosition = Vector3(Random::GetFloatRange(-10.0f, 10.0f), Random::GetFloatRange(5.0f, 15.0f), Random::GetFloatRange(-10.0f, 10.0f));
+    // Inicialização aleatória para dar variedade ao bando inicial
+    mPosition = Vector3(Random::GetFloatRange(-10.0f, 10.0f), Random::GetFloatRange(25.0f, 35.0f), Random::GetFloatRange(-10.0f, 10.0f));
 	mYaw = Random::GetFloatRange(0.0f, 360.0f);
     mPrevYaw = mYaw;
 	mPitch = Random::GetFloatRange(-20.0f, 20.0f);
     mRoll = 0.0f;
-    mColor = Vector3(0.0f, 1.0f, 0.0f);
+    mColor = Vector3(0.5f, 0.5f, 1.0f); // Cor padrão azulada para o bando
 
-    // Inicializa animação dessincronizada
+    // Se este boid for criado e já houver um objetivo, define uma velocidade inicial
+    if (mWorld->GetGoal() && this != mWorld->GetGoal()) {
+        mSpeed = mMaxSpeed * 0.8f;
+    }
+
+    // Inicializa animação dessincronizada [cite: 26, 27]
     mAnimPhase = Random::GetFloatRange(0.0f, Math::TwoPi);
-    mFlapSpeed = Random::GetFloatRange(15.0f, 25.0f); // Alguns batem mais rápido que outros
+    mFlapSpeed = Random::GetFloatRange(15.0f, 25.0f); 
 
     mWorld->AddBoid(this);
 }
 
 void Boid::Update(float deltaTime) {
-    // Calcula o quanto o boid girou neste frame
-    float yawDiff = mYaw - mPrevYaw;
+    
+    bool isGoal = (this == mWorld->GetGoal());
 
-    // Lida com a virada de 360 para 0 graus
+    // --- LÓGICA DE FLOCKING (Bando) ---
+    if (!isGoal) {
+        const float separationWeight = 1.5f;
+        const float alignmentWeight = 1.0f;
+        const float cohesionWeight = 0.8f;
+        const float goalWeight = 1.2f; // Peso forte para não perderem o líder
+        
+        const float perceptionRadius = 20.0f;
+        const float separationRadius = 8.0f;
+
+        Vector3 separation(0,0,0);
+        Vector3 alignment(0,0,0);
+        Vector3 cohesion(0,0,0);
+        Vector3 goalForce(0,0,0);
+
+        Vector3 centerOfMass(0,0,0);
+        int neighborCount = 0;
+
+        std::vector<Boid*> boids = mWorld->GetBoids();
+        Boid* goalBoid = mWorld->GetGoal();
+
+        for (auto other : boids) {
+            if (other == this) continue;
+
+            float dist = Vector3::Distance(mPosition, other->GetPosition());
+
+            // Check vital: evita processar boids na mesma exata posição (dist=0)
+            if (dist > 0.001f && dist < perceptionRadius) {
+                
+                // 1. Separação
+                if (dist < separationRadius) {
+                    Vector3 push = mPosition - other->GetPosition();
+                    // PROTEÇÃO: Só normaliza se vetor não for nulo
+                    if (push.LengthSq() > 0.001f) {
+                        push.Normalize();
+                        separation += push * (1.0f / dist); 
+                    }
+                }
+
+                // 2. Alinhamento
+                alignment += other->GetVelocity();
+
+                // 3. Coesão
+                centerOfMass += other->GetPosition();
+
+                neighborCount++;
+            }
+        }
+
+        if (neighborCount > 0) {
+            // Alinhamento
+            // PROTEÇÃO: Só normaliza se a média das velocidades não for nula
+            if (alignment.LengthSq() > 0.001f) {
+                alignment.Normalize();
+            }
+
+            // Coesão
+            centerOfMass *= (1.0f / static_cast<float>(neighborCount));
+            Vector3 directionToCenter = centerOfMass - mPosition;
+            // PROTEÇÃO
+            if (directionToCenter.LengthSq() > 0.001f) {
+                directionToCenter.Normalize();
+                cohesion = directionToCenter;
+            }
+        }
+
+        // 4. Busca do Objetivo
+        if (goalBoid) {
+            Vector3 directionToGoal = goalBoid->GetPosition() - mPosition;
+            // PROTEÇÃO
+            if (directionToGoal.LengthSq() > 0.001f) {
+                directionToGoal.Normalize();
+                goalForce = directionToGoal;
+            }
+        }
+
+        // Soma vetorial
+        Vector3 steering = (separation * separationWeight) +
+                           (alignment * alignmentWeight) +
+                           (cohesion * cohesionWeight) +
+                           (goalForce * goalWeight);
+
+        // Aplica forças
+        // PROTEÇÃO CRÍTICA: Se steering for zero, não fazemos nada para evitar NaN
+        if (steering.LengthSq() > 0.001f) {
+            steering.Normalize();
+            Vector3 targetVelocity = steering * mMaxSpeed;
+            
+            float turnSpeed = 5.0f * deltaTime; // Resposta mais rápida
+            mVelocity = Vector3::Lerp(mVelocity, targetVelocity, turnSpeed);
+        }
+
+        // Velocidade mínima para evitar parar e gerar erros de normalização no futuro
+        if (mVelocity.LengthSq() < 0.1f) {
+             // Se parou, dá um empurrãozinho para frente (ou eixo Z se for zero total)
+             if (mVelocity.LengthSq() < 0.0001f) mVelocity = Vector3(0,0,1);
+             
+             Vector3 vNorm = mVelocity;
+             vNorm.Normalize();
+             mVelocity = vNorm * 2.0f; // Velocidade mínima
+        }
+        
+        mPosition += mVelocity * deltaTime;
+
+        // Atualiza Yaw/Pitch baseado na velocidade
+        if (mVelocity.LengthSq() > 0.001f) {
+            Vector3 dir = mVelocity;
+            dir.Normalize();
+            mYaw = Math::ToDegrees(atan2f(dir.x, dir.z));
+            mPitch = Math::ToDegrees(asinf(Math::Clamp(dir.y, -1.0f, 1.0f)));
+        }
+        
+        mSpeed = mVelocity.Length();
+    }
+    // --- LÓGICA DO LÍDER (Objetivo) ---
+    else {
+        float yawRad = Math::ToRadians(mYaw);
+        float pitchRad = Math::ToRadians(mPitch);
+
+        Vector3 forward(
+            cosf(pitchRad) * sinf(yawRad),
+            sinf(pitchRad),
+            cosf(pitchRad) * cosf(yawRad)
+        );
+        // PROTEÇÃO
+        if (forward.LengthSq() > 0.001f) forward.Normalize();
+        
+        mVelocity = forward * mSpeed;
+        mPosition += mVelocity * deltaTime;
+    }
+
+    // --- ANIMAÇÃO E BANKING (Comum a todos) ---
+    float yawDiff = mYaw - mPrevYaw;
     if (yawDiff > 180.0f) yawDiff -= 360.0f;
     if (yawDiff < -180.0f) yawDiff += 360.0f;
 
-    // Define o Roll Alvo
-    float targetRoll = yawDiff * -10.0f;
+    float targetRoll = yawDiff * -8.0f;
+    targetRoll = Math::Clamp(targetRoll, -60.0f, 60.0f);
 
-    // Limita o ângulo máximo de inclinação
-    if (targetRoll > 60.0f) targetRoll = 60.0f;
-    if (targetRoll < -60.0f) targetRoll = -60.0f;
-
-    // Suavização (Interpolation)
-
-    float bankSpeed = 10.0f;
-
-    // Se não estiver virando (yawDiff perto de 0), volta ao centro mais devagar (efeito inércia)
-    if (fabs(yawDiff) < 0.1f) {
-        bankSpeed = 3.0f;
-    }
-
+    float bankSpeed = (fabs(yawDiff) < 0.1f) ? 2.0f : 5.0f;
     mRoll += (targetRoll - mRoll) * bankSpeed * deltaTime;
 
-    // Atualiza o ciclo de animação
-    mAnimPhase += mFlapSpeed * deltaTime;
-
-    if (mAnimPhase > Math::TwoPi) {
-        mAnimPhase -= Math::TwoPi;
-	}
-
-    float yawRad = mYaw * Math::Pi / 180.0f;
-    float pitchRad = mPitch * Math::Pi / 180.0f;
-
-    // Direção frente considerando yaw e pitch
-    Vector3 forward(
-        cosf(pitchRad) * sinf(yawRad),  // x
-        sinf(pitchRad),                 // y
-        cosf(pitchRad) * cosf(yawRad)   // z
-    );
-
-    forward.Normalize();
-    mVelocity = forward * mSpeed;
-    mPosition += mVelocity * deltaTime;
+    float flapFactor = 1.0f + (mSpeed / mMaxSpeed); 
+    mAnimPhase += (mFlapSpeed * flapFactor) * deltaTime;
+    if (mAnimPhase > Math::TwoPi) mAnimPhase -= Math::TwoPi;
 
     mPrevYaw = mYaw;
-
 }
 
+// Substitua também o CalculateNormal para evitar NaN na renderização
 Vector3 Boid::CalculateNormal(Vector3 v1, Vector3 v2, Vector3 v3) {
     Vector3 edge1 = v2 - v1;
     Vector3 edge2 = v3 - v1;
     Vector3 normal = Vector3::Cross(edge1, edge2);
-    normal.Normalize();
+    
+    // PROTEÇÃO: Se o triângulo for degenerado (área zero), retorna Up vector padrão
+    if (normal.LengthSq() > 0.0001f) {
+        normal.Normalize();
+    } else {
+        return Vector3(0, 1, 0); 
+    }
     return normal;
 }
 
@@ -96,7 +213,7 @@ void Boid::DrawBirdModel(float wingOffset) {
     Vector3 vBodySideL(-0.4f * s, 0.0f * s, 0.5f * s);
 
     // --- APLICANDO A ANIMAÇÃO NAS ASAS ---
-    // Somamos o wingOffset no eixo Y das pontas das asas
+    // Somamos o wingOffset no eixo Y das pontas das asas [cite: 25]
     Vector3 vWingR(2.5f * s, 0.2f * s + wingOffset, -0.5f * s);
     Vector3 vWingL(-2.5f * s, 0.2f * s + wingOffset, -0.5f * s);
 
@@ -215,9 +332,10 @@ void Boid::Draw() {
      glPushMatrix();
      glTranslatef(mPosition.x, mPosition.y, mPosition.z);
 
-     glRotatef(mYaw, 0.0f, 1.0f, 0.0f);
-     glRotatef(-mPitch, 1.0f, 0.0f, 0.0f);
-     glRotatef(mRoll, 0.0f, 0.0f, 1.0f);
+     // Aplica as rotações baseadas no movimento calculado no Update
+     glRotatef(mYaw, 0.0f, 1.0f, 0.0f);   // Direção horizontal [cite: 39]
+     glRotatef(-mPitch, 1.0f, 0.0f, 0.0f);// Direção vertical (inverso no OpenGL) [cite: 38]
+     glRotatef(mRoll, 0.0f, 0.0f, 1.0f);  // Inclinação nas curvas [cite: 40]
 
      // --- CÁLCULO DA ANIMAÇÃO DA ASA ---
     // sin(mAnimPhase) vai de -1 a 1. 
@@ -230,8 +348,12 @@ void Boid::Draw() {
 }
 
 void Boid::HandleKey(std::map<unsigned char, bool> keyStates, std::map<unsigned char, bool> prevKeyStates) {
+    // Apenas o boid objetivo deve processar inputs diretamente
+    // No entanto, como o World chama HandleKey no mGoal, esta lógica está correta aqui.
+    // O Update() do boid objetivo usará os valores alterados aqui.
+    
     const float rotSpeed = 3.0f;   // graus por tecla
-    const float accel = 0.2f;      // aceleração
+    const float accel = 0.5f;      // aceleração
 
     // Rotação horizontal (Yaw)
     if (keyStates['a']) {
